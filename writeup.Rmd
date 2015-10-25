@@ -1,0 +1,136 @@
+---
+title: "Predicting correctness of barbell lifts"
+author: "Gertlae"
+date: "Sunday, October 25, 2015"
+output:
+  html_document:
+    keep_md: true
+
+---
+
+# Executive Summary  
+
+Our goal was to use data from 4 accelerometers placed on respectively the belt, forearm, arm, and dumbell of 6 subjects. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways, classified as A, B, C ,D and E. Based on the measurements from the accelerometer sensors, we predict the class how the exercise was performed and compare it with the recorded classification in the data that was recorded through observation by experienced barbell lifting trainers.  
+For this classification problem a random forest model was built depending on a selection of 9 measurements provided by the accelerometers. The model has an estimated out of sample error between 98,8% and 99,4%.  
+The model was built using the dataset provided. This dataset was split into train (60%), test(20%) and validation(20%) datasets. The test set was used to tune the model. The validation set was used to estimate the out of sample error.
+
+# The input data
+```{r echo =FALSE}
+fileurl1 = "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+fileurl2 = "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(fileurl1, destfile = "pmltrain.csv")
+download.file(fileurl2, destfile = "pmltest.csv")
+sample = read.csv("pmltrain.csv", header = T)
+quiz = read.csv("pmltest.csv", header = T)
+```  
+The pml-training.csv contains the sample data and it will be called the sample dataset in the remainder. The pml-testing.csv contains the 20 cases to be predicted for the assignment. We will refer to this data as the quiz data. When looking at the sample we understand from [Velloso et al, 2013] that the data contains time windows, and features that aggregate the raw features collected from the four sensors per time window in each row where new window = 'yes'. For this assignment we drop the aggregate features and the window related features to keep the subject name, raw sensor observations and classe as columns in both the sample and quiz data.set. Both subject name and classe are loaded as factors.
+
+```{r echo =FALSE}
+v = colnames(sample)
+coldrop = c(grep('X',v),grep('timestamp',v), grep('window',v), grep('kurtosis',v), grep('skewness',v), grep('max_',v), 
+                grep('min_',v), grep('amplitude',v), grep('var_',v),grep('avg_',v), grep('stddev_',v))
+
+sample = sample[,-coldrop]
+quiz = quiz[,-coldrop]
+```  
+This leaves us with two tidy data sets sample and quiz. Sample containing 19622 observations of 54 variables (aka features). Quiz containing 20 observations of 54 variables. Given the large size of the sample dataset, we split the sample data up in a train (60%), test(20%) and validation(20%) dataset. The model is built and tuned using train and test set. Validation is then used to estimate the out of sample error. Quiz will be used to submit for this assignment using the tuned model. The caret createDataPartition was used to split the data.   
+
+```{r echo =FALSE, warning=FALSE,  results='hide' ,message=FALSE}
+library(caret)
+intrain = createDataPartition(sample$classe, p = 0.6, list = FALSE)
+train = sample[intrain,]
+tv = sample[-intrain,]
+intest = createDataPartition(tv$classe, p = 0.5, list = FALSE)
+test = tv[intest,]
+valid = tv[intest,]
+```
+
+# Building the model
+As this is a classification problem and we want maximum accuracy, we decide to use a random forest model and build it using the caret R-package. First we build the ideal model by using the caret train function on the train dataset using all features. Given the large size of the train data set, we use the default cross validation settings of the train function. It took a night of processing to calculate the ideal model. 
+```{r, eval=FALSE, warning=FALSE}
+library(caret)
+modFit = train(classe ~ ., data=train, method ="rf", prox = TRUE)
+save(modFit, file = 'modfitfull.Rdata')
+```
+
+```{r echo = FALSE}
+load('modfitfull.Rdata')
+modFit
+```
+
+As expected, the ideal model was large, it takes > 1Gb of internal memory. As expected it has very high accuracy and kappa on the test data set. 
+```{r , echo = FALSE, warning=FALSE,message=FALSE}
+prediction1 = predict(modFit, newdata = test)
+confusionMatrix(prediction1,test$classe)$overall
+confusionMatrix(prediction1,test$classe)$table
+```  
+In order to obtain a more workable model, we use recursive feauture elimination using the variable importance metric provided by the ideal model calculation. The 10 most important features for the ideal model are
+```{r echo = FALSE}
+vrank = varImp(modFit)$importance
+vrank$featurename = as.factor(rownames(vrank))
+vrank = vrank[order(vrank$Overall, decreasing = T),]
+head(vrank, 10)
+```  
+
+For each number of features, starting from 1 till 10 we determine the accuracy and kappa using the test data set. 
+``` {r, echo = TRUE, eval = FALSE}
+search.term = vrank$featurename
+maxfeatures = 10
+results = NULL
+for (i in (1:maxfeatures))
+{
+        cselection = NULL
+        v = colnames(train)
+        for (j in (1:i))
+        {
+        cselection = c(cselection, grep(paste("^",search.term, sep="")[j],v))
+        }
+        print(head(train[,c(cselection, length(train))],1))
+        print(paste ("nbr of features = ", i, "starting on :", date()))
+        modFitrfe = train(classe ~ ., data=train[,c(cselection, length(train))], method ="rf")
+        prediction = predict(modFitrfe, newdata = test[,c(cselection, length(test))])
+        results = c(results,i,confusionMatrix(prediction,test$classe)$overall)
+        print(paste ("nbr of features = ", i, " ending on :", date()))
+        
+        
+}
+dfr = t(matrix(results,nrow = 8,ncol = 10))
+colnames(dfr)= names(results) [1:8]
+save(dfr, file = 'rferesults.Rdata')
+```  
+
+``` {r, echo = FALSE, eval = TRUE}
+load('rferesults.Rdata')
+dfr = t(matrix(results,nrow = 8,ncol = 10))
+colnames(dfr)= names(results) [1:8]
+nbroffeatures = dfr[,1] ; accuracy = dfr[,2]; kappa = dfr[,3]
+plot(nbroffeatures,accuracy, main = "Accuracy")
+plot(nbroffeatures,kappa, main = "Kappa")
+```  
+
+We decide to use the model with the 9 most important features from the ideal model.
+```{r, echo = FALSE, eval = FALSE}
+i=9
+cselection = NULL
+v = colnames(train)
+for (j in (1:i))
+{
+        cselection = c(cselection, grep(paste("^",search.term, sep="")[j],v))
+        
+}
+modFit9f = train(classe ~ ., data=train[,c(cselection, length(train))], method ="rf")
+save(modFit9f, file = 'modFit9f.Rdata')
+```  
+## Results
+The expected out of sample error for the final model based on the 9 features is estimated using the validation data set.
+``` {r, echo = FALSE, eval = TRUE}
+load('modFit9f.Rdata')
+prediction2 = predict(modFit9f, newdata = valid)
+confusionMatrix(prediction2,valid$classe)$table
+confusionMatrix(prediction2,valid$classe)$overall
+```  
+We decide to use this model to submit the answers for the quiz data.
+
+### References  
+
+[Velloso et al, 2013] Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
